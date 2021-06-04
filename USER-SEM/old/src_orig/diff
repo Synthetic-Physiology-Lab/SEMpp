@@ -1,0 +1,801 @@
+/* ----------------------------------------------------------	/* ----------------------------------------------------------
+   LAMMPS - Large-scale Atomic/Molecular Massively Parallel S	   LAMMPS - Large-scale Atomic/Molecular Massively Parallel S
+   https://lammps.sandia.gov/, Sandia National Laboratories	   https://lammps.sandia.gov/, Sandia National Laboratories
+   Steve Plimpton, sjplimp@sandia.gov				   Steve Plimpton, sjplimp@sandia.gov
+
+   Copyright (2003) Sandia Corporation.  Under the terms of C	   Copyright (2003) Sandia Corporation.  Under the terms of C
+   DE-AC04-94AL85000 with Sandia Corporation, the U.S. Govern	   DE-AC04-94AL85000 with Sandia Corporation, the U.S. Govern
+   certain rights in this software.  This software is distrib	   certain rights in this software.  This software is distrib
+   the GNU General Public License.				   the GNU General Public License.
+
+   See the README file in the top-level LAMMPS directory.	   See the README file in the top-level LAMMPS directory.
+-------------------------------------------------------------	-------------------------------------------------------------
+
+#include "fix_adapt.h"						#include "fix_adapt.h"
+#include <cstring>						#include <cstring>
+#include "atom.h"						#include "atom.h"
+#include "bond.h"						#include "bond.h"
+#include "domain.h"						#include "domain.h"
+#include "update.h"						#include "update.h"
+#include "group.h"						#include "group.h"
+#include "modify.h"						#include "modify.h"
+#include "force.h"						#include "force.h"
+#include "pair.h"						#include "pair.h"
+#include "pair_hybrid.h"					#include "pair_hybrid.h"
+#include "kspace.h"						#include "kspace.h"
+#include "fix_store.h"						#include "fix_store.h"
+#include "input.h"						#include "input.h"
+#include "variable.h"						#include "variable.h"
+#include "respa.h"						#include "respa.h"
+#include "math_const.h"						#include "math_const.h"
+#include "memory.h"						#include "memory.h"
+#include "error.h"						#include "error.h"
+
+
+
+using namespace LAMMPS_NS;					using namespace LAMMPS_NS;
+using namespace FixConst;					using namespace FixConst;
+using namespace MathConst;					using namespace MathConst;
+
+enum{PAIR,KSPACE,ATOM,BOND};					enum{PAIR,KSPACE,ATOM,BOND};
+enum{DIAMETER,CHARGE,POLYMERIZATION};			      |	enum{DIAMETER,CHARGE
+							      |	    //@@@SEM
+							      |	    ,POLYMERIZATION};
+
+/* ----------------------------------------------------------	/* ----------------------------------------------------------
+
+FixAdapt::FixAdapt(LAMMPS *lmp, int narg, char **arg) : Fix(l	FixAdapt::FixAdapt(LAMMPS *lmp, int narg, char **arg) : Fix(l
+nadapt(0), id_fix_diam(nullptr), id_fix_chg(nullptr), adapt(n	nadapt(0), id_fix_diam(nullptr), id_fix_chg(nullptr), adapt(n
+{								{
+  if (narg < 5) error->all(FLERR,"Illegal fix adapt command")	  if (narg < 5) error->all(FLERR,"Illegal fix adapt command")
+  nevery = utils::inumeric(FLERR,arg[3],false,lmp);		  nevery = utils::inumeric(FLERR,arg[3],false,lmp);
+  if (nevery < 0) error->all(FLERR,"Illegal fix adapt command	  if (nevery < 0) error->all(FLERR,"Illegal fix adapt command
+
+  dynamic_group_allow = 1;					  dynamic_group_allow = 1;
+  create_attribute = 1;						  create_attribute = 1;
+
+  // count # of adaptations					  // count # of adaptations
+
+  nadapt = 0;							  nadapt = 0;
+
+  int iarg = 4;							  int iarg = 4;
+  while (iarg < narg) {						  while (iarg < narg) {
+    if (strcmp(arg[iarg],"pair") == 0) {			    if (strcmp(arg[iarg],"pair") == 0) {
+      if (iarg+6 > narg) error->all(FLERR,"Illegal fix adapt 	      if (iarg+6 > narg) error->all(FLERR,"Illegal fix adapt 
+      nadapt++;							      nadapt++;
+      iarg += 6;						      iarg += 6;
+    } else if (strcmp(arg[iarg],"kspace") == 0) {		    } else if (strcmp(arg[iarg],"kspace") == 0) {
+      if (iarg+2 > narg) error->all(FLERR,"Illegal fix adapt 	      if (iarg+2 > narg) error->all(FLERR,"Illegal fix adapt 
+      nadapt++;							      nadapt++;
+      iarg += 2;						      iarg += 2;
+    } else if (strcmp(arg[iarg],"atom") == 0) {			    } else if (strcmp(arg[iarg],"atom") == 0) {
+      if (iarg+3 > narg) error->all(FLERR,"Illegal fix adapt 	      if (iarg+3 > narg) error->all(FLERR,"Illegal fix adapt 
+      nadapt++;							      nadapt++;
+      iarg += 3;						      iarg += 3;
+    } else if (strcmp(arg[iarg],"bond") == 0 ){			    } else if (strcmp(arg[iarg],"bond") == 0 ){
+      if (iarg+5 > narg) error->all(FLERR,"Illegal fix adapt 	      if (iarg+5 > narg) error->all(FLERR,"Illegal fix adapt 
+      nadapt++;							      nadapt++;
+      iarg += 5;						      iarg += 5;
+    } else break;						    } else break;
+  }								  }
+
+  if (nadapt == 0) error->all(FLERR,"Illegal fix adapt comman	  if (nadapt == 0) error->all(FLERR,"Illegal fix adapt comman
+  adapt = new Adapt[nadapt];					  adapt = new Adapt[nadapt];
+
+  // parse keywords						  // parse keywords
+
+  nadapt = 0;							  nadapt = 0;
+  diamflag = 0;							  diamflag = 0;
+  chgflag = 0;							  chgflag = 0;
+  polyflag = 0;//@@@SEM						  polyflag = 0;//@@@SEM
+
+  iarg = 4;							  iarg = 4;
+  while (iarg < narg) {						  while (iarg < narg) {
+    if (strcmp(arg[iarg],"pair") == 0) {			    if (strcmp(arg[iarg],"pair") == 0) {
+      if (iarg+6 > narg) error->all(FLERR,"Illegal fix adapt 	      if (iarg+6 > narg) error->all(FLERR,"Illegal fix adapt 
+      adapt[nadapt].which = PAIR;				      adapt[nadapt].which = PAIR;
+      int n = strlen(arg[iarg+1]) + 1;				      int n = strlen(arg[iarg+1]) + 1;
+      adapt[nadapt].pstyle = new char[n];			      adapt[nadapt].pstyle = new char[n];
+      strcpy(adapt[nadapt].pstyle,arg[iarg+1]);			      strcpy(adapt[nadapt].pstyle,arg[iarg+1]);
+      n = strlen(arg[iarg+2]) + 1;				      n = strlen(arg[iarg+2]) + 1;
+      adapt[nadapt].pparam = new char[n];			      adapt[nadapt].pparam = new char[n];
+      adapt[nadapt].pair = nullptr;				      adapt[nadapt].pair = nullptr;
+      strcpy(adapt[nadapt].pparam,arg[iarg+2]);			      strcpy(adapt[nadapt].pparam,arg[iarg+2]);
+      utils::bounds(FLERR,arg[iarg+3],1,atom->ntypes,		      utils::bounds(FLERR,arg[iarg+3],1,atom->ntypes,
+                    adapt[nadapt].ilo,adapt[nadapt].ihi,error	                    adapt[nadapt].ilo,adapt[nadapt].ihi,error
+      utils::bounds(FLERR,arg[iarg+4],1,atom->ntypes,		      utils::bounds(FLERR,arg[iarg+4],1,atom->ntypes,
+                    adapt[nadapt].jlo,adapt[nadapt].jhi,error	                    adapt[nadapt].jlo,adapt[nadapt].jhi,error
+      if (strstr(arg[iarg+5],"v_") == arg[iarg+5]) {		      if (strstr(arg[iarg+5],"v_") == arg[iarg+5]) {
+        n = strlen(&arg[iarg+5][2]) + 1;			        n = strlen(&arg[iarg+5][2]) + 1;
+        adapt[nadapt].var = new char[n];			        adapt[nadapt].var = new char[n];
+        strcpy(adapt[nadapt].var,&arg[iarg+5][2]);		        strcpy(adapt[nadapt].var,&arg[iarg+5][2]);
+      } else error->all(FLERR,"Illegal fix adapt command");	      } else error->all(FLERR,"Illegal fix adapt command");
+      nadapt++;							      nadapt++;
+      iarg += 6;						      iarg += 6;
+
+    } else if (strcmp(arg[iarg],"bond") == 0 ){			    } else if (strcmp(arg[iarg],"bond") == 0 ){
+      if (iarg+5 > narg) error->all(FLERR, "Illegal fix adapt	      if (iarg+5 > narg) error->all(FLERR, "Illegal fix adapt
+      adapt[nadapt].which = BOND;				      adapt[nadapt].which = BOND;
+      int n = strlen(arg[iarg+1]) + 1;				      int n = strlen(arg[iarg+1]) + 1;
+      adapt[nadapt].bstyle = new char[n];			      adapt[nadapt].bstyle = new char[n];
+      strcpy(adapt[nadapt].bstyle,arg[iarg+1]);			      strcpy(adapt[nadapt].bstyle,arg[iarg+1]);
+      n = strlen(arg[iarg+2]) + 1;				      n = strlen(arg[iarg+2]) + 1;
+      adapt[nadapt].bparam = new char[n];			      adapt[nadapt].bparam = new char[n];
+      adapt[nadapt].bond = nullptr;				      adapt[nadapt].bond = nullptr;
+      strcpy(adapt[nadapt].bparam,arg[iarg+2]);			      strcpy(adapt[nadapt].bparam,arg[iarg+2]);
+      utils::bounds(FLERR,arg[iarg+3],1,atom->nbondtypes,	      utils::bounds(FLERR,arg[iarg+3],1,atom->nbondtypes,
+                    adapt[nadapt].ilo,adapt[nadapt].ihi,error	                    adapt[nadapt].ilo,adapt[nadapt].ihi,error
+      if (strstr(arg[iarg+4],"v_") == arg[iarg+4]) {		      if (strstr(arg[iarg+4],"v_") == arg[iarg+4]) {
+        n = strlen(&arg[iarg+4][2]) + 1;			        n = strlen(&arg[iarg+4][2]) + 1;
+        adapt[nadapt].var = new char[n];			        adapt[nadapt].var = new char[n];
+        strcpy(adapt[nadapt].var,&arg[iarg+4][2]);		        strcpy(adapt[nadapt].var,&arg[iarg+4][2]);
+      } else error->all(FLERR,"Illegal fix adapt command");	      } else error->all(FLERR,"Illegal fix adapt command");
+      nadapt++;							      nadapt++;
+      iarg += 5;						      iarg += 5;
+
+    } else if (strcmp(arg[iarg],"kspace") == 0) {		    } else if (strcmp(arg[iarg],"kspace") == 0) {
+      if (iarg+2 > narg) error->all(FLERR,"Illegal fix adapt 	      if (iarg+2 > narg) error->all(FLERR,"Illegal fix adapt 
+      adapt[nadapt].which = KSPACE;				      adapt[nadapt].which = KSPACE;
+      if (strstr(arg[iarg+1],"v_") == arg[iarg+1]) {		      if (strstr(arg[iarg+1],"v_") == arg[iarg+1]) {
+        int n = strlen(&arg[iarg+1][2]) + 1;			        int n = strlen(&arg[iarg+1][2]) + 1;
+        adapt[nadapt].var = new char[n];			        adapt[nadapt].var = new char[n];
+        strcpy(adapt[nadapt].var,&arg[iarg+1][2]);		        strcpy(adapt[nadapt].var,&arg[iarg+1][2]);
+      } else error->all(FLERR,"Illegal fix adapt command");	      } else error->all(FLERR,"Illegal fix adapt command");
+      nadapt++;							      nadapt++;
+      iarg += 2;						      iarg += 2;
+
+    } else if (strcmp(arg[iarg],"atom") == 0) {			    } else if (strcmp(arg[iarg],"atom") == 0) {
+      if (iarg+3 > narg) error->all(FLERR,"Illegal fix adapt 	      if (iarg+3 > narg) error->all(FLERR,"Illegal fix adapt 
+      adapt[nadapt].which = ATOM;				      adapt[nadapt].which = ATOM;
+      if (strcmp(arg[iarg+1],"diameter") == 0 ||		      if (strcmp(arg[iarg+1],"diameter") == 0 ||
+          strcmp(arg[iarg+1],"diameter/disc") == 0) {		          strcmp(arg[iarg+1],"diameter/disc") == 0) {
+        adapt[nadapt].aparam = DIAMETER;			        adapt[nadapt].aparam = DIAMETER;
+        diamflag = 1;						        diamflag = 1;
+        discflag = 0;						        discflag = 0;
+        if (strcmp(arg[iarg+1],"diameter/disc") == 0) discfla	        if (strcmp(arg[iarg+1],"diameter/disc") == 0) discfla
+      } else if (strcmp(arg[iarg+1],"charge") == 0) {		      } else if (strcmp(arg[iarg+1],"charge") == 0) {
+        adapt[nadapt].aparam = CHARGE;				        adapt[nadapt].aparam = CHARGE;
+        chgflag = 1;						        chgflag = 1;
+      }  						      |	      }
+      //@@@SEM							      //@@@SEM
+      else if (strcmp(arg[iarg+1],"p") == 0){			      else if (strcmp(arg[iarg+1],"p") == 0){
+        adapt[nadapt].aparam = POLYMERIZATION;			        adapt[nadapt].aparam = POLYMERIZATION;
+        polyflag = 1;						        polyflag = 1;
+      }								      }
+      //@@@SEM-END         				      |	      //@@@SEM-END
+      } else error->all(FLERR,"Illegal fix adapt command");   |	       else error->all(FLERR,"Illegal fix adapt command");
+      if (strstr(arg[iarg+2],"v_") == arg[iarg+2]) {		      if (strstr(arg[iarg+2],"v_") == arg[iarg+2]) {
+        int n = strlen(&arg[iarg+2][2]) + 1;			        int n = strlen(&arg[iarg+2][2]) + 1;
+        adapt[nadapt].var = new char[n];			        adapt[nadapt].var = new char[n];
+        strcpy(adapt[nadapt].var,&arg[iarg+2][2]);		        strcpy(adapt[nadapt].var,&arg[iarg+2][2]);
+      } else error->all(FLERR,"Illegal fix adapt command");	      } else error->all(FLERR,"Illegal fix adapt command");
+      nadapt++;							      nadapt++;
+      iarg += 3;						      iarg += 3;
+    } else break;						    } else break;
+  }								  }
+
+  // optional keywords						  // optional keywords
+
+  resetflag = 0;						  resetflag = 0;
+  scaleflag = 0;						  scaleflag = 0;
+  massflag = 1;							  massflag = 1;
+
+  while (iarg < narg) {						  while (iarg < narg) {
+    if (strcmp(arg[iarg],"reset") == 0) {			    if (strcmp(arg[iarg],"reset") == 0) {
+      if (iarg+2 > narg) error->all(FLERR,"Illegal fix adapt 	      if (iarg+2 > narg) error->all(FLERR,"Illegal fix adapt 
+      if (strcmp(arg[iarg+1],"no") == 0) resetflag = 0;		      if (strcmp(arg[iarg+1],"no") == 0) resetflag = 0;
+      else if (strcmp(arg[iarg+1],"yes") == 0) resetflag = 1;	      else if (strcmp(arg[iarg+1],"yes") == 0) resetflag = 1;
+      else error->all(FLERR,"Illegal fix adapt command");	      else error->all(FLERR,"Illegal fix adapt command");
+      iarg += 2;						      iarg += 2;
+    } else if (strcmp(arg[iarg],"scale") == 0) {		    } else if (strcmp(arg[iarg],"scale") == 0) {
+      if (iarg+2 > narg) error->all(FLERR,"Illegal fix adapt 	      if (iarg+2 > narg) error->all(FLERR,"Illegal fix adapt 
+      if (strcmp(arg[iarg+1],"no") == 0) scaleflag = 0;		      if (strcmp(arg[iarg+1],"no") == 0) scaleflag = 0;
+      else if (strcmp(arg[iarg+1],"yes") == 0) scaleflag = 1;	      else if (strcmp(arg[iarg+1],"yes") == 0) scaleflag = 1;
+      else error->all(FLERR,"Illegal fix adapt command");	      else error->all(FLERR,"Illegal fix adapt command");
+      iarg += 2;						      iarg += 2;
+    } else if (strcmp(arg[iarg],"mass") == 0) {			    } else if (strcmp(arg[iarg],"mass") == 0) {
+      if (iarg+2 > narg)error->all(FLERR,"Illegal fix adapt c	      if (iarg+2 > narg)error->all(FLERR,"Illegal fix adapt c
+      if (strcmp(arg[iarg+1],"no") == 0) massflag = 0;		      if (strcmp(arg[iarg+1],"no") == 0) massflag = 0;
+      else if (strcmp(arg[iarg+1],"yes") == 0) massflag = 1;	      else if (strcmp(arg[iarg+1],"yes") == 0) massflag = 1;
+      else error->all(FLERR,"Illegal fix adapt command");	      else error->all(FLERR,"Illegal fix adapt command");
+      iarg += 2;						      iarg += 2;
+    } else error->all(FLERR,"Illegal fix adapt command");	    } else error->all(FLERR,"Illegal fix adapt command");
+  }								  }
+
+  // if scaleflag set with diameter or charge adaptation,	  // if scaleflag set with diameter or charge adaptation,
+  // then previous step scale factors are written to restart 	  // then previous step scale factors are written to restart 
+  // initialize them here in case one is used and other is ne	  // initialize them here in case one is used and other is ne
+
+  if (scaleflag && (diamflag || chgflag)) restart_global = 1;	  if (scaleflag && (diamflag || chgflag)) restart_global = 1;
+  previous_diam_scale = previous_chg_scale = 1.0;		  previous_diam_scale = previous_chg_scale = 1.0;
+
+  // allocate pair style arrays					  // allocate pair style arrays
+
+  int n = atom->ntypes;						  int n = atom->ntypes;
+  for (int m = 0; m < nadapt; m++)				  for (int m = 0; m < nadapt; m++)
+    if (adapt[m].which == PAIR)					    if (adapt[m].which == PAIR)
+      memory->create(adapt[m].array_orig,n+1,n+1,"adapt:array	      memory->create(adapt[m].array_orig,n+1,n+1,"adapt:array
+
+  // allocate bond style arrays:				  // allocate bond style arrays:
+
+  n = atom->nbondtypes;						  n = atom->nbondtypes;
+  for (int m = 0; m < nadapt; ++m)				  for (int m = 0; m < nadapt; ++m)
+    if (adapt[m].which == BOND)					    if (adapt[m].which == BOND)
+      memory->create(adapt[m].vector_orig,n+1,"adapt:vector_o	      memory->create(adapt[m].vector_orig,n+1,"adapt:vector_o
+}								}
+
+/* ----------------------------------------------------------	/* ----------------------------------------------------------
+
+FixAdapt::~FixAdapt()						FixAdapt::~FixAdapt()
+{								{
+  for (int m = 0; m < nadapt; m++) {				  for (int m = 0; m < nadapt; m++) {
+    delete [] adapt[m].var;					    delete [] adapt[m].var;
+    if (adapt[m].which == PAIR) {				    if (adapt[m].which == PAIR) {
+      delete [] adapt[m].pstyle;				      delete [] adapt[m].pstyle;
+      delete [] adapt[m].pparam;				      delete [] adapt[m].pparam;
+      memory->destroy(adapt[m].array_orig);			      memory->destroy(adapt[m].array_orig);
+    } else if (adapt[m].which == BOND) {			    } else if (adapt[m].which == BOND) {
+      delete [] adapt[m].bstyle;				      delete [] adapt[m].bstyle;
+      delete [] adapt[m].bparam;				      delete [] adapt[m].bparam;
+      memory->destroy(adapt[m].vector_orig);			      memory->destroy(adapt[m].vector_orig);
+    }								    }
+  }								  }
+  delete [] adapt;						  delete [] adapt;
+
+  // check nfix in case all fixes have already been deleted	  // check nfix in case all fixes have already been deleted
+
+  if (id_fix_diam && modify->nfix) modify->delete_fix(id_fix_	  if (id_fix_diam && modify->nfix) modify->delete_fix(id_fix_
+  if (id_fix_chg && modify->nfix) modify->delete_fix(id_fix_c	  if (id_fix_chg && modify->nfix) modify->delete_fix(id_fix_c
+  delete [] id_fix_diam;					  delete [] id_fix_diam;
+  delete [] id_fix_chg;						  delete [] id_fix_chg;
+}								}
+
+/* ----------------------------------------------------------	/* ----------------------------------------------------------
+
+int FixAdapt::setmask()						int FixAdapt::setmask()
+{								{
+  int mask = 0;							  int mask = 0;
+  mask |= PRE_FORCE;						  mask |= PRE_FORCE;
+  mask |= POST_RUN;						  mask |= POST_RUN;
+  mask |= PRE_FORCE_RESPA;					  mask |= PRE_FORCE_RESPA;
+  return mask;							  return mask;
+}								}
+
+/* ----------------------------------------------------------	/* ----------------------------------------------------------
+   if need to restore per-atom quantities, create new fix STO	   if need to restore per-atom quantities, create new fix STO
+-------------------------------------------------------------	-------------------------------------------------------------
+
+void FixAdapt::post_constructor()				void FixAdapt::post_constructor()
+{								{
+  if (!resetflag) return;					  if (!resetflag) return;
+  if (!diamflag && !chgflag) return;				  if (!diamflag && !chgflag) return;
+
+  // new id = fix-ID + FIX_STORE_ATTRIBUTE			  // new id = fix-ID + FIX_STORE_ATTRIBUTE
+  // new fix group = group for this fix				  // new fix group = group for this fix
+
+  id_fix_diam = nullptr;					  id_fix_diam = nullptr;
+  id_fix_chg = nullptr;						  id_fix_chg = nullptr;
+
+  if (diamflag && atom->radius_flag) {				  if (diamflag && atom->radius_flag) {
+    std::string fixcmd = id + std::string("_FIX_STORE_DIAM");	    std::string fixcmd = id + std::string("_FIX_STORE_DIAM");
+    id_fix_diam = new char[fixcmd.size()+1];			    id_fix_diam = new char[fixcmd.size()+1];
+    strcpy(id_fix_diam,fixcmd.c_str());				    strcpy(id_fix_diam,fixcmd.c_str());
+    fixcmd += fmt::format(" {} STORE peratom 1 1",group->name	    fixcmd += fmt::format(" {} STORE peratom 1 1",group->name
+    modify->add_fix(fixcmd);					    modify->add_fix(fixcmd);
+    fix_diam = (FixStore *) modify->fix[modify->nfix-1];	    fix_diam = (FixStore *) modify->fix[modify->nfix-1];
+
+    if (fix_diam->restart_reset) fix_diam->restart_reset = 0;	    if (fix_diam->restart_reset) fix_diam->restart_reset = 0;
+    else {							    else {
+      double *vec = fix_diam->vstore;				      double *vec = fix_diam->vstore;
+      double *radius = atom->radius;				      double *radius = atom->radius;
+      int *mask = atom->mask;					      int *mask = atom->mask;
+      int nlocal = atom->nlocal;				      int nlocal = atom->nlocal;
+
+      for (int i = 0; i < nlocal; i++) {			      for (int i = 0; i < nlocal; i++) {
+        if (mask[i] & groupbit) vec[i] = radius[i];		        if (mask[i] & groupbit) vec[i] = radius[i];
+        else vec[i] = 0.0;					        else vec[i] = 0.0;
+      }								      }
+    }								    }
+  }								  }
+
+  if (chgflag && atom->q_flag) {				  if (chgflag && atom->q_flag) {
+    std::string fixcmd = id + std::string("_FIX_STORE_CHG");	    std::string fixcmd = id + std::string("_FIX_STORE_CHG");
+    id_fix_chg = new char[fixcmd.size()+1];			    id_fix_chg = new char[fixcmd.size()+1];
+    strcpy(id_fix_chg,fixcmd.c_str());				    strcpy(id_fix_chg,fixcmd.c_str());
+    fixcmd += fmt::format(" {} STORE peratom 1 1",group->name	    fixcmd += fmt::format(" {} STORE peratom 1 1",group->name
+    modify->add_fix(fixcmd);					    modify->add_fix(fixcmd);
+    fix_chg = (FixStore *) modify->fix[modify->nfix-1];		    fix_chg = (FixStore *) modify->fix[modify->nfix-1];
+
+    if (fix_chg->restart_reset) fix_chg->restart_reset = 0;	    if (fix_chg->restart_reset) fix_chg->restart_reset = 0;
+    else {							    else {
+      double *vec = fix_chg->vstore;				      double *vec = fix_chg->vstore;
+      double *q = atom->q;					      double *q = atom->q;
+      int *mask = atom->mask;					      int *mask = atom->mask;
+      int nlocal = atom->nlocal;				      int nlocal = atom->nlocal;
+
+      for (int i = 0; i < nlocal; i++) {			      for (int i = 0; i < nlocal; i++) {
+        if (mask[i] & groupbit) vec[i] = q[i];			        if (mask[i] & groupbit) vec[i] = q[i];
+        else vec[i] = 0.0;					        else vec[i] = 0.0;
+      }								      }
+      //@@@SEM						      |	     }
+      if (ad->aparam == POLYMERIZATION) {		      <
+        if (!atom->sem_flag)				      <
+          error->all(FLERR,"Fix adapt requires atom of sem st <
+      }							      <
+      //@@@SEM						      <
+    }							      <
+  }								  }
+}								}
+
+/* ----------------------------------------------------------	/* ----------------------------------------------------------
+
+void FixAdapt::init()						void FixAdapt::init()
+{								{
+  int i,j;							  int i,j;
+
+  // allow a dynamic group only if ATOM attribute not used	  // allow a dynamic group only if ATOM attribute not used
+
+  if (group->dynamic[igroup])					  if (group->dynamic[igroup])
+    for (int i = 0; i < nadapt; i++)				    for (int i = 0; i < nadapt; i++)
+      if (adapt[i].which == ATOM)				      if (adapt[i].which == ATOM)
+        error->all(FLERR,"Cannot use dynamic group with fix a	        error->all(FLERR,"Cannot use dynamic group with fix a
+
+  // setup and error checks					  // setup and error checks
+
+  anypair = 0;							  anypair = 0;
+  anybond = 0;							  anybond = 0;
+
+  for (int m = 0; m < nadapt; m++) {				  for (int m = 0; m < nadapt; m++) {
+    Adapt *ad = &adapt[m];					    Adapt *ad = &adapt[m];
+
+    ad->ivar = input->variable->find(ad->var);			    ad->ivar = input->variable->find(ad->var);
+    if (ad->ivar < 0)						    if (ad->ivar < 0)
+      error->all(FLERR,"Variable name for fix adapt does not 	      error->all(FLERR,"Variable name for fix adapt does not 
+    if (!input->variable->equalstyle(ad->ivar))			    if (!input->variable->equalstyle(ad->ivar))
+      error->all(FLERR,"Variable for fix adapt is invalid sty	      error->all(FLERR,"Variable for fix adapt is invalid sty
+
+    if (ad->which == PAIR) {					    if (ad->which == PAIR) {
+      anypair = 1;						      anypair = 1;
+      ad->pair = nullptr;					      ad->pair = nullptr;
+
+      // if ad->pstyle has trailing sub-style annotation ":N"	      // if ad->pstyle has trailing sub-style annotation ":N"
+      //   strip it for pstyle arg to pair_match() and set ns	      //   strip it for pstyle arg to pair_match() and set ns
+      // this should work for appended suffixes as well		      // this should work for appended suffixes as well
+
+      int n = strlen(ad->pstyle) + 1;				      int n = strlen(ad->pstyle) + 1;
+      char *pstyle = new char[n];				      char *pstyle = new char[n];
+      strcpy(pstyle,ad->pstyle);				      strcpy(pstyle,ad->pstyle);
+
+      char *cptr;						      char *cptr;
+      int nsub = 0;						      int nsub = 0;
+      if ((cptr = strchr(pstyle,':'))) {			      if ((cptr = strchr(pstyle,':'))) {
+        *cptr = '\0';						        *cptr = '\0';
+        nsub = utils::inumeric(FLERR,cptr+1,false,lmp);		        nsub = utils::inumeric(FLERR,cptr+1,false,lmp);
+      }								      }
+
+      if (lmp->suffix_enable) {					      if (lmp->suffix_enable) {
+        int len = 2 + strlen(pstyle) + strlen(lmp->suffix);	        int len = 2 + strlen(pstyle) + strlen(lmp->suffix);
+        char *psuffix = new char[len];				        char *psuffix = new char[len];
+        strcpy(psuffix,pstyle);					        strcpy(psuffix,pstyle);
+        strcat(psuffix,"/");					        strcat(psuffix,"/");
+        strcat(psuffix,lmp->suffix);				        strcat(psuffix,lmp->suffix);
+        ad->pair = force->pair_match(psuffix,1,nsub);		        ad->pair = force->pair_match(psuffix,1,nsub);
+        delete[] psuffix;					        delete[] psuffix;
+      }								      }
+      if (ad->pair == nullptr) ad->pair = force->pair_match(p	      if (ad->pair == nullptr) ad->pair = force->pair_match(p
+      if (ad->pair == nullptr)					      if (ad->pair == nullptr)
+        error->all(FLERR,"Fix adapt pair style does not exist	        error->all(FLERR,"Fix adapt pair style does not exist
+
+      void *ptr = ad->pair->extract(ad->pparam,ad->pdim);	      void *ptr = ad->pair->extract(ad->pparam,ad->pdim);
+      if (ptr == nullptr)					      if (ptr == nullptr)
+        error->all(FLERR,"Fix adapt pair style param not supp	        error->all(FLERR,"Fix adapt pair style param not supp
+
+      // for pair styles only parameters that are 2-d arrays 	      // for pair styles only parameters that are 2-d arrays 
+      // scalars are supported					      // scalars are supported
+
+      if (ad->pdim != 2 && ad->pdim != 0)			      if (ad->pdim != 2 && ad->pdim != 0)
+        error->all(FLERR,"Fix adapt pair style param is not c	        error->all(FLERR,"Fix adapt pair style param is not c
+
+      if (ad->pdim == 2) ad->array = (double **) ptr;		      if (ad->pdim == 2) ad->array = (double **) ptr;
+      if (ad->pdim == 0) ad->scalar = (double *) ptr;		      if (ad->pdim == 0) ad->scalar = (double *) ptr;
+
+      // if pair hybrid, test that ilo,ihi,jlo,jhi are valid 	      // if pair hybrid, test that ilo,ihi,jlo,jhi are valid 
+
+      if (utils::strmatch(force->pair_style,"^hybrid")) {	      if (utils::strmatch(force->pair_style,"^hybrid")) {
+        PairHybrid *pair = (PairHybrid *) force->pair;		        PairHybrid *pair = (PairHybrid *) force->pair;
+        for (i = ad->ilo; i <= ad->ihi; i++)			        for (i = ad->ilo; i <= ad->ihi; i++)
+          for (j = MAX(ad->jlo,i); j <= ad->jhi; j++)		          for (j = MAX(ad->jlo,i); j <= ad->jhi; j++)
+            if (!pair->check_ijtype(i,j,pstyle))		            if (!pair->check_ijtype(i,j,pstyle))
+              error->all(FLERR,"Fix adapt type pair range is 	              error->all(FLERR,"Fix adapt type pair range is 
+                         "pair hybrid sub-style");		                         "pair hybrid sub-style");
+      }								      }
+
+      delete [] pstyle;						      delete [] pstyle;
+    } else if (ad->which == BOND){				    } else if (ad->which == BOND){
+      ad->bond = nullptr;					      ad->bond = nullptr;
+      anybond = 1;						      anybond = 1;
+
+      int n = strlen(ad->bstyle) + 1;				      int n = strlen(ad->bstyle) + 1;
+      char *bstyle = new char[n];				      char *bstyle = new char[n];
+      strcpy(bstyle,ad->bstyle);				      strcpy(bstyle,ad->bstyle);
+
+      if (lmp->suffix_enable) {					      if (lmp->suffix_enable) {
+        int len = 2 + strlen(bstyle) + strlen(lmp->suffix);	        int len = 2 + strlen(bstyle) + strlen(lmp->suffix);
+        char *bsuffix = new char[len];				        char *bsuffix = new char[len];
+        strcpy(bsuffix,bstyle);					        strcpy(bsuffix,bstyle);
+        strcat(bsuffix,"/");					        strcat(bsuffix,"/");
+        strcat(bsuffix,lmp->suffix);				        strcat(bsuffix,lmp->suffix);
+        ad->bond = force->bond_match(bsuffix);			        ad->bond = force->bond_match(bsuffix);
+        delete [] bsuffix;					        delete [] bsuffix;
+      }								      }
+      if (ad->bond == nullptr) ad->bond = force->bond_match(b	      if (ad->bond == nullptr) ad->bond = force->bond_match(b
+      if (ad->bond == nullptr )					      if (ad->bond == nullptr )
+        error->all(FLERR,"Fix adapt bond style does not exist	        error->all(FLERR,"Fix adapt bond style does not exist
+
+      void *ptr = ad->bond->extract(ad->bparam,ad->bdim);	      void *ptr = ad->bond->extract(ad->bparam,ad->bdim);
+
+      if (ptr == nullptr)					      if (ptr == nullptr)
+        error->all(FLERR,"Fix adapt bond style param not supp	        error->all(FLERR,"Fix adapt bond style param not supp
+
+      // for bond styles, use a vector				      // for bond styles, use a vector
+
+      if (ad->bdim == 1) ad->vector = (double *) ptr;		      if (ad->bdim == 1) ad->vector = (double *) ptr;
+
+      if (utils::strmatch(force->bond_style,"^hybrid"))		      if (utils::strmatch(force->bond_style,"^hybrid"))
+        error->all(FLERR,"Fix adapt does not support bond_sty	        error->all(FLERR,"Fix adapt does not support bond_sty
+
+      delete [] bstyle;						      delete [] bstyle;
+
+    } else if (ad->which == KSPACE) {				    } else if (ad->which == KSPACE) {
+      if (force->kspace == nullptr)				      if (force->kspace == nullptr)
+        error->all(FLERR,"Fix adapt kspace style does not exi	        error->all(FLERR,"Fix adapt kspace style does not exi
+      kspace_scale = (double *) force->kspace->extract("scale	      kspace_scale = (double *) force->kspace->extract("scale
+
+    } else if (ad->which == ATOM) {				    } else if (ad->which == ATOM) {
+      if (ad->aparam == DIAMETER) {				      if (ad->aparam == DIAMETER) {
+        if (!atom->radius_flag)					        if (!atom->radius_flag)
+          error->all(FLERR,"Fix adapt requires atom attribute	          error->all(FLERR,"Fix adapt requires atom attribute
+        if (!atom->rmass_flag)					        if (!atom->rmass_flag)
+          error->all(FLERR,"Fix adapt requires atom attribute	          error->all(FLERR,"Fix adapt requires atom attribute
+        if (discflag && domain->dimension != 2)			        if (discflag && domain->dimension != 2)
+          error->all(FLERR,"Fix adapt requires 2d simulation"	          error->all(FLERR,"Fix adapt requires 2d simulation"
+        if (!restart_reset) previous_diam_scale = 1.0;		        if (!restart_reset) previous_diam_scale = 1.0;
+      }								      }
+      if (ad->aparam == CHARGE) {				      if (ad->aparam == CHARGE) {
+        if (!atom->q_flag)					        if (!atom->q_flag)
+          error->all(FLERR,"Fix adapt requires atom attribute	          error->all(FLERR,"Fix adapt requires atom attribute
+        if (!restart_reset) previous_chg_scale = 1.0;		        if (!restart_reset) previous_chg_scale = 1.0;
+      }								      }
+      //@@@SEM							      //@@@SEM
+      else if (ad->aparam == POLYMERIZATION) {		      |	      if (ad->aparam == POLYMERIZATION) {
+        double * p = atom->p;				      |	        if (!atom->sem_flag)
+        int *mask = atom->mask;				      |	          error->all(FLERR,"Fix adapt requires atom of sem st
+        int nlocal = atom->nlocal;			      |	      }
+        int nall = nlocal + atom->nghost;		      |	      //@@@SEM
+        for (i = 0; i < nall; i++)			      <
+          if (mask[i] & groupbit) p[i] = value;		      <
+        }						      <
+      //@@@SEM-end					      <
+
+    }								    }
+  }								  }
+
+  if (restart_reset) restart_reset = 0;				  if (restart_reset) restart_reset = 0;
+
+  // make copy of original pair/bond array values		  // make copy of original pair/bond array values
+
+  for (int m = 0; m < nadapt; m++) {				  for (int m = 0; m < nadapt; m++) {
+    Adapt *ad = &adapt[m];					    Adapt *ad = &adapt[m];
+    if (ad->which == PAIR && ad->pdim == 2) {			    if (ad->which == PAIR && ad->pdim == 2) {
+      for (i = ad->ilo; i <= ad->ihi; i++)			      for (i = ad->ilo; i <= ad->ihi; i++)
+        for (j = MAX(ad->jlo,i); j <= ad->jhi; j++)		        for (j = MAX(ad->jlo,i); j <= ad->jhi; j++)
+          ad->array_orig[i][j] = ad->array[i][j];		          ad->array_orig[i][j] = ad->array[i][j];
+    } else if (ad->which == PAIR && ad->pdim == 0){		    } else if (ad->which == PAIR && ad->pdim == 0){
+      ad->scalar_orig = *ad->scalar;				      ad->scalar_orig = *ad->scalar;
+
+    } else if (ad->which == BOND && ad->bdim == 1){		    } else if (ad->which == BOND && ad->bdim == 1){
+      for (i = ad->ilo; i <= ad->ihi; ++i )			      for (i = ad->ilo; i <= ad->ihi; ++i )
+        ad->vector_orig[i] = ad->vector[i];			        ad->vector_orig[i] = ad->vector[i];
+    }								    }
+
+  }								  }
+
+  // fixes that store initial per-atom values			  // fixes that store initial per-atom values
+
+  if (id_fix_diam) {						  if (id_fix_diam) {
+    int ifix = modify->find_fix(id_fix_diam);			    int ifix = modify->find_fix(id_fix_diam);
+    if (ifix < 0) error->all(FLERR,"Could not find fix adapt 	    if (ifix < 0) error->all(FLERR,"Could not find fix adapt 
+    fix_diam = (FixStore *) modify->fix[ifix];			    fix_diam = (FixStore *) modify->fix[ifix];
+  }								  }
+  if (id_fix_chg) {						  if (id_fix_chg) {
+    int ifix = modify->find_fix(id_fix_chg);			    int ifix = modify->find_fix(id_fix_chg);
+    if (ifix < 0) error->all(FLERR,"Could not find fix adapt 	    if (ifix < 0) error->all(FLERR,"Could not find fix adapt 
+    fix_chg = (FixStore *) modify->fix[ifix];			    fix_chg = (FixStore *) modify->fix[ifix];
+  }								  }
+
+  if (strstr(update->integrate_style,"respa"))			  if (strstr(update->integrate_style,"respa"))
+    nlevels_respa = ((Respa *) update->integrate)->nlevels;	    nlevels_respa = ((Respa *) update->integrate)->nlevels;
+}								}
+
+/* ----------------------------------------------------------	/* ----------------------------------------------------------
+
+void FixAdapt::setup_pre_force(int /*vflag*/)			void FixAdapt::setup_pre_force(int /*vflag*/)
+{								{
+  change_settings();						  change_settings();
+}								}
+
+/* ----------------------------------------------------------	/* ----------------------------------------------------------
+
+void FixAdapt::setup_pre_force_respa(int vflag, int ilevel)	void FixAdapt::setup_pre_force_respa(int vflag, int ilevel)
+{								{
+  if (ilevel < nlevels_respa-1) return;				  if (ilevel < nlevels_respa-1) return;
+  setup_pre_force(vflag);					  setup_pre_force(vflag);
+}								}
+
+/* ----------------------------------------------------------	/* ----------------------------------------------------------
+
+void FixAdapt::pre_force(int /*vflag*/)				void FixAdapt::pre_force(int /*vflag*/)
+{								{
+  if (nevery == 0) return;					  if (nevery == 0) return;
+  if (update->ntimestep % nevery) return;			  if (update->ntimestep % nevery) return;
+  change_settings();						  change_settings();
+}								}
+
+/* ----------------------------------------------------------	/* ----------------------------------------------------------
+
+void FixAdapt::pre_force_respa(int vflag, int ilevel, int)	void FixAdapt::pre_force_respa(int vflag, int ilevel, int)
+{								{
+  if (ilevel < nlevels_respa-1) return;				  if (ilevel < nlevels_respa-1) return;
+  pre_force(vflag);						  pre_force(vflag);
+}								}
+
+/* ----------------------------------------------------------	/* ----------------------------------------------------------
+
+void FixAdapt::post_run()					void FixAdapt::post_run()
+{								{
+  if (resetflag) restore_settings();				  if (resetflag) restore_settings();
+}								}
+
+/* ----------------------------------------------------------	/* ----------------------------------------------------------
+   change pair,kspace,atom parameters based on variable evalu	   change pair,kspace,atom parameters based on variable evalu
+-------------------------------------------------------------	-------------------------------------------------------------
+
+void FixAdapt::change_settings()				void FixAdapt::change_settings()
+{								{
+  int i,j;							  int i,j;
+
+  // variable evaluation may invoke computes so wrap with cle	  // variable evaluation may invoke computes so wrap with cle
+
+  modify->clearstep_compute();					  modify->clearstep_compute();
+
+  for (int m = 0; m < nadapt; m++) {				  for (int m = 0; m < nadapt; m++) {
+    Adapt *ad = &adapt[m];					    Adapt *ad = &adapt[m];
+    double value = input->variable->compute_equal(ad->ivar);	    double value = input->variable->compute_equal(ad->ivar);
+
+    // set global scalar or type pair array values		    // set global scalar or type pair array values
+
+    if (ad->which == PAIR) {					    if (ad->which == PAIR) {
+      if (ad->pdim == 0) {					      if (ad->pdim == 0) {
+        if (scaleflag) *ad->scalar = value * ad->scalar_orig;	        if (scaleflag) *ad->scalar = value * ad->scalar_orig;
+        else *ad->scalar = value;				        else *ad->scalar = value;
+      } else if (ad->pdim == 2) {				      } else if (ad->pdim == 2) {
+        if (scaleflag)						        if (scaleflag)
+          for (i = ad->ilo; i <= ad->ihi; i++)			          for (i = ad->ilo; i <= ad->ihi; i++)
+            for (j = MAX(ad->jlo,i); j <= ad->jhi; j++)		            for (j = MAX(ad->jlo,i); j <= ad->jhi; j++)
+              ad->array[i][j] = value*ad->array_orig[i][j];	              ad->array[i][j] = value*ad->array_orig[i][j];
+        else							        else
+          for (i = ad->ilo; i <= ad->ihi; i++)			          for (i = ad->ilo; i <= ad->ihi; i++)
+            for (j = MAX(ad->jlo,i); j <= ad->jhi; j++)		            for (j = MAX(ad->jlo,i); j <= ad->jhi; j++)
+              ad->array[i][j] = value;				              ad->array[i][j] = value;
+      }								      }
+
+    // set bond type array values:				    // set bond type array values:
+
+    } else if (ad->which == BOND) {				    } else if (ad->which == BOND) {
+      if (ad->bdim == 1){					      if (ad->bdim == 1){
+        if (scaleflag)						        if (scaleflag)
+          for (i = ad->ilo; i <= ad->ihi; ++i )			          for (i = ad->ilo; i <= ad->ihi; ++i )
+            ad->vector[i] = value*ad->vector_orig[i];		            ad->vector[i] = value*ad->vector_orig[i];
+        else							        else
+          for (i = ad->ilo; i <= ad->ihi; ++i )			          for (i = ad->ilo; i <= ad->ihi; ++i )
+            ad->vector[i] = value;				            ad->vector[i] = value;
+      }								      }
+
+    // set kspace scale factor					    // set kspace scale factor
+
+    } else if (ad->which == KSPACE) {				    } else if (ad->which == KSPACE) {
+      *kspace_scale = value;					      *kspace_scale = value;
+
+    // set per atom values, also make changes for ghost atoms	    // set per atom values, also make changes for ghost atoms
+
+    } else if (ad->which == ATOM) {				    } else if (ad->which == ATOM) {
+
+      // reset radius to new value, for both owned and ghost 	      // reset radius to new value, for both owned and ghost 
+      // also reset rmass to new value assuming density remai	      // also reset rmass to new value assuming density remai
+      // for scaleflag, previous_diam_scale is the scale fact	      // for scaleflag, previous_diam_scale is the scale fact
+
+      if (ad->aparam == DIAMETER) {				      if (ad->aparam == DIAMETER) {
+        double scale;						        double scale;
+        double *radius = atom->radius;				        double *radius = atom->radius;
+        double *rmass = atom->rmass;				        double *rmass = atom->rmass;
+        int *mask = atom->mask;					        int *mask = atom->mask;
+        int nlocal = atom->nlocal;				        int nlocal = atom->nlocal;
+        int nall = nlocal + atom->nghost;			        int nall = nlocal + atom->nghost;
+
+        if (scaleflag) scale = value / previous_diam_scale;	        if (scaleflag) scale = value / previous_diam_scale;
+
+        for (i = 0; i < nall; i++) {				        for (i = 0; i < nall; i++) {
+          if (mask[i] & groupbit) {				          if (mask[i] & groupbit) {
+            if (massflag) {					            if (massflag) {
+              if (!scaleflag) scale = 0.5*value / radius[i];	              if (!scaleflag) scale = 0.5*value / radius[i];
+              if (discflag) rmass[i] *= scale*scale;		              if (discflag) rmass[i] *= scale*scale;
+              else rmass[i] *= scale*scale*scale;		              else rmass[i] *= scale*scale*scale;
+            }							            }
+            if (scaleflag) radius[i] *= scale;			            if (scaleflag) radius[i] *= scale;
+            else radius[i] = 0.5*value;				            else radius[i] = 0.5*value;
+          }							          }
+        }							        }
+
+        if (scaleflag) previous_diam_scale = value;		        if (scaleflag) previous_diam_scale = value;
+
+      // reset charge to new value, for both owned and ghost 	      // reset charge to new value, for both owned and ghost 
+      // for scaleflag, previous_chg_scale is the scale facto	      // for scaleflag, previous_chg_scale is the scale facto
+
+      } else if (ad->aparam == CHARGE) {			      } else if (ad->aparam == CHARGE) {
+        double scale;						        double scale;
+        double *q = atom->q;					        double *q = atom->q;
+        int *mask = atom->mask;					        int *mask = atom->mask;
+        int nlocal = atom->nlocal;				        int nlocal = atom->nlocal;
+        int nall = nlocal + atom->nghost;			        int nall = nlocal + atom->nghost;
+
+        if (scaleflag) scale = value / previous_chg_scale;	        if (scaleflag) scale = value / previous_chg_scale;
+
+        for (i = 0; i < nall; i++) {				        for (i = 0; i < nall; i++) {
+          if (mask[i] & groupbit) {				          if (mask[i] & groupbit) {
+            if (scaleflag) q[i] *= scale;			            if (scaleflag) q[i] *= scale;
+            else q[i] = value;					            else q[i] = value;
+          }							          }
+        }							        }
+
+        if (scaleflag) previous_chg_scale = value;		        if (scaleflag) previous_chg_scale = value;
+      }								      }
+							      >	      //@@@SEM
+							      >	      else if (ad->aparam == POLYMERIZATION) {
+							      >	        double * p = atom->p;
+							      >	        int *mask = atom->mask;
+							      >	        int nlocal = atom->nlocal;
+							      >	        int nall = nlocal + atom->nghost;
+							      >	        for (i = 0; i < nall; i++)
+							      >	          if (mask[i] & groupbit) p[i] = value;
+							      >	        }
+							      >	      //@@@SEM-end
+    }								    }
+  }								  }
+
+  modify->addstep_compute(update->ntimestep + nevery);		  modify->addstep_compute(update->ntimestep + nevery);
+
+  // re-initialize pair styles if any PAIR settings were chan	  // re-initialize pair styles if any PAIR settings were chan
+  // ditto for bond styles if any BOND settings were changed	  // ditto for bond styles if any BOND settings were changed
+  // this resets other coeffs that may depend on changed valu	  // this resets other coeffs that may depend on changed valu
+  //   and also offset and tail corrections			  //   and also offset and tail corrections
+
+  if (anypair) {						  if (anypair) {
+    for (int m = 0; m < nadapt; m++) {				    for (int m = 0; m < nadapt; m++) {
+      Adapt *ad = &adapt[m];					      Adapt *ad = &adapt[m];
+      if (ad->which == PAIR) {					      if (ad->which == PAIR) {
+        ad->pair->reinit();					        ad->pair->reinit();
+      }								      }
+    }								    }
+  }								  }
+  if (anybond) {						  if (anybond) {
+    for (int m = 0; m < nadapt; ++m ) {				    for (int m = 0; m < nadapt; ++m ) {
+      Adapt *ad = &adapt[m];					      Adapt *ad = &adapt[m];
+      if (ad->which == BOND) {					      if (ad->which == BOND) {
+        ad->bond->reinit();					        ad->bond->reinit();
+      }								      }
+    }								    }
+  }								  }
+
+  // reset KSpace charges if charges have changed		  // reset KSpace charges if charges have changed
+
+  if (chgflag && force->kspace) force->kspace->qsum_qsq();	  if (chgflag && force->kspace) force->kspace->qsum_qsq();
+}								}
+
+/* ----------------------------------------------------------	/* ----------------------------------------------------------
+   restore pair,kspace,atom parameters to original values	   restore pair,kspace,atom parameters to original values
+-------------------------------------------------------------	-------------------------------------------------------------
+
+void FixAdapt::restore_settings()				void FixAdapt::restore_settings()
+{								{
+  for (int m = 0; m < nadapt; m++) {				  for (int m = 0; m < nadapt; m++) {
+    Adapt *ad = &adapt[m];					    Adapt *ad = &adapt[m];
+    if (ad->which == PAIR) {					    if (ad->which == PAIR) {
+      if (ad->pdim == 0) *ad->scalar = ad->scalar_orig;		      if (ad->pdim == 0) *ad->scalar = ad->scalar_orig;
+      else if (ad->pdim == 2) {					      else if (ad->pdim == 2) {
+        for (int i = ad->ilo; i <= ad->ihi; i++)		        for (int i = ad->ilo; i <= ad->ihi; i++)
+          for (int j = MAX(ad->jlo,i); j <= ad->jhi; j++)	          for (int j = MAX(ad->jlo,i); j <= ad->jhi; j++)
+            ad->array[i][j] = ad->array_orig[i][j];		            ad->array[i][j] = ad->array_orig[i][j];
+      }								      }
+
+    } else if (ad->which == BOND) {				    } else if (ad->which == BOND) {
+      if (ad->pdim == 1) {					      if (ad->pdim == 1) {
+        for (int i = ad->ilo; i <= ad->ihi; i++)		        for (int i = ad->ilo; i <= ad->ihi; i++)
+          ad->vector[i] = ad->vector_orig[i];			          ad->vector[i] = ad->vector_orig[i];
+      }								      }
+
+    } else if (ad->which == KSPACE) {				    } else if (ad->which == KSPACE) {
+      *kspace_scale = 1.0;					      *kspace_scale = 1.0;
+
+    } else if (ad->which == ATOM) {				    } else if (ad->which == ATOM) {
+      if (diamflag) {						      if (diamflag) {
+        double scale;						        double scale;
+
+        double *vec = fix_diam->vstore;				        double *vec = fix_diam->vstore;
+        double *radius = atom->radius;				        double *radius = atom->radius;
+        double *rmass = atom->rmass;				        double *rmass = atom->rmass;
+        int *mask = atom->mask;					        int *mask = atom->mask;
+        int nlocal = atom->nlocal;				        int nlocal = atom->nlocal;
+
+        if (scaleflag) scale = previous_diam_scale;		        if (scaleflag) scale = previous_diam_scale;
+
+        for (int i = 0; i < nlocal; i++)			        for (int i = 0; i < nlocal; i++)
+          if (mask[i] & groupbit) {				          if (mask[i] & groupbit) {
+            if (massflag) {					            if (massflag) {
+              if (!scaleflag) scale = vec[i] / radius[i];	              if (!scaleflag) scale = vec[i] / radius[i];
+              if (discflag) rmass[i] *= scale*scale;		              if (discflag) rmass[i] *= scale*scale;
+              else rmass[i] *= scale*scale*scale;		              else rmass[i] *= scale*scale*scale;
+            }							            }
+            radius[i] = vec[i];					            radius[i] = vec[i];
+          }							          }
+      }								      }
+      if (chgflag) {						      if (chgflag) {
+        double *vec = fix_chg->vstore;				        double *vec = fix_chg->vstore;
+        double *q = atom->q;					        double *q = atom->q;
+        int *mask = atom->mask;					        int *mask = atom->mask;
+        int nlocal = atom->nlocal;				        int nlocal = atom->nlocal;
+
+        for (int i = 0; i < nlocal; i++)			        for (int i = 0; i < nlocal; i++)
+          if (mask[i] & groupbit) q[i] = vec[i];		          if (mask[i] & groupbit) q[i] = vec[i];
+      }								      }
+    }								    }
+  }								  }
+
+  if (anypair) force->pair->reinit();				  if (anypair) force->pair->reinit();
+  if (anybond) force->bond->reinit();				  if (anybond) force->bond->reinit();
+  if (chgflag && force->kspace) force->kspace->qsum_qsq();	  if (chgflag && force->kspace) force->kspace->qsum_qsq();
+}								}
+
+/* ----------------------------------------------------------	/* ----------------------------------------------------------
+   initialize one atom's storage values, called when atom is 	   initialize one atom's storage values, called when atom is 
+-------------------------------------------------------------	-------------------------------------------------------------
+
+void FixAdapt::set_arrays(int i)				void FixAdapt::set_arrays(int i)
+{								{
+  if (fix_diam) fix_diam->vstore[i] = atom->radius[i];		  if (fix_diam) fix_diam->vstore[i] = atom->radius[i];
+  if (fix_chg) fix_chg->vstore[i] = atom->q[i];			  if (fix_chg) fix_chg->vstore[i] = atom->q[i];
+}								}
+
+/* ----------------------------------------------------------	/* ----------------------------------------------------------
+   write scale factors for diameter and charge to restart fil	   write scale factors for diameter and charge to restart fil
+-------------------------------------------------------------	-------------------------------------------------------------
+
+void FixAdapt::write_restart(FILE *fp)				void FixAdapt::write_restart(FILE *fp)
+{								{
+  int size = 2*sizeof(double);					  int size = 2*sizeof(double);
+
+  fwrite(&size,sizeof(int),1,fp);				  fwrite(&size,sizeof(int),1,fp);
+  fwrite(&previous_diam_scale,sizeof(double),1,fp);		  fwrite(&previous_diam_scale,sizeof(double),1,fp);
+  fwrite(&previous_chg_scale,sizeof(double),1,fp);		  fwrite(&previous_chg_scale,sizeof(double),1,fp);
+}								}
+
+/* ----------------------------------------------------------	/* ----------------------------------------------------------
+   use scale factors from restart file to restart the Fix	   use scale factors from restart file to restart the Fix
+-------------------------------------------------------------	-------------------------------------------------------------
+
+void FixAdapt::restart(char *buf)				void FixAdapt::restart(char *buf)
+{								{
+  double *dbuf = (double *) buf;				  double *dbuf = (double *) buf;
+
+  previous_diam_scale = dbuf[0];				  previous_diam_scale = dbuf[0];
+  previous_chg_scale = dbuf[1];					  previous_chg_scale = dbuf[1];
+}								}

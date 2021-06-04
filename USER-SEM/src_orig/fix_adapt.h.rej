@@ -1,0 +1,10 @@
+--- fix_adapt.h	2021-06-01 21:43:51.749011879 +0200
++++ fix_adapt.h	2021-06-01 21:43:51.749011879 +0200
+@@ -28,6 +28,7 @@
+  public:
+   int diamflag;        // 1 if atom diameters will vary, for AtomVecGranular
+   int chgflag; 
++  int polyflag;        //@@@SEM 1 if atom polymerization factor will vary, for AtomVecSem
+ 
+   FixAdapt(class LAMMPS *, int, char **);
+   ~FixAdapt();

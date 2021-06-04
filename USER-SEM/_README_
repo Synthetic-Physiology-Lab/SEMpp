@@ -1,0 +1,70 @@
+--------------------------
+HOW TO CITE:
+--------------------------
+Milde F., Tauriello G., Haberkern H., Koumoutsakos P., SEM++: A particle model of cellular growth, signaling and migration, Comp. Part. Mech., 1(2):211-227, 2014
+DOI: http://dx.doi.org/10.1137/130943078
+
+--------------------------
+To compile: (once LAMMPS compiles)
+--------------------------
+- put USER-SEM in src
+- add the package to the makefile by appending user-sem to this line in the Makefile:
+
+	PACKUSER = user-misc user-atc user-awpmd user-cg-cmm \
+	   user-cuda user-eff user-ewaldn user-omp user-reaxc user-sph user-sem
+
+- add the package
+	$make yes-user-sem
+
+- also add the molecule package
+	$make yes-molecule
+
+- if you change the code in the package, to recompile, you have to update the package:
+	$make package-update
+
+- recompile LAMMPS with "make -j 5 <MACHINE>" -> or even more than 5 if it is too slow
+  (see below for details)
+
+- test with bench/in.*.txt
+-> in.growN1000.txt: grow cell from 1 to N = 1000 SCE -> result stored as grownUp.restart
+-> in.randN1000.txt: equilibrate cell with N = 1000 randomly positioned SCE -> result stored as grownUp.restart
+-> in.stress15000.txt: using grownUp.restart produced above, fix top/bottom and stretch with 15 Pa
+-> in.nuc_growN1000.txt: like in.growN1000.txt but with addition of nucleus (5% of cell volume)
+-> in.nuc_stress15000.txt: stretching result of in.nuc_growN1000.txt with 15 Pa
+=> xyz files can be visualized in VMD (see below for how to deal with growth)
+-> these scripts are just for demonstration!
+=> in practice, we run LAMMPS as a library and compute constants at runtime instead of hard-coding them as in these demo-scripts
+
+--------------------------
+Notes on compiling LAMMPS:
+--------------------------
+- Get from svn -> http://lammps.sandia.gov/download.html#svn
+-> all of this tested with rev. 12300 (8.8.2014)
+- Either install MPI compiler or execute "make" in "src/STUBS"
+- Compile: get into "src" folder and type: make -j 5 <MACHINE>-> <MACHINE> = serial  (requires gcc, no MPI, no fftw)
+-> <MACHINE> = mac     (for Mac, no MPI, requires gcc, fftw)
+-> <MACHINE> = mac_mpi (for Mac, requires gcc46, openmpi, fftw, jpeg)
+-> <MACHINE> = linux   (for Linux, requires icc, mpich2, fftw, jpeg)
+-> <MACHINE> = g++     (for Linux, requires gcc, mpich2, fftw, jpeg)(or adapt src/MAKE/Makefile.<MACHINE> for your needs)
+- Test in "bench" folder by executing "../src/lmp_<MACHINE> -in in.lj"
+-> -in <FILE> defines which <FILE> is loaded as input script
+
+- Hints for Mac:
+-> get GNU sed: http://ftp.gnu.org/pub/gnu/sed/, ./configure --prefix=/opt/local, make, sudo make install
+   (make sure /opt/local/bin in $PATH before /usr/bin)
+-> get MacPorts or Homebrew to install all required tools
+
+--------------------------
+Notes on VMD for growth: (Mac)
+--------------------------
+(tested with 1.9.1 (topotools 1.2))
+- Open /Applications/VMD 1.9.1.app/Contents/vmd/plugins/noarch/tcl/topotools1.2
+- Replace files with files in VMD folder
+For other versions (BETA)
+- Use "set retval [readvarxyz $fname [lrange $newargs 1 end]]" in topotools.tcl
+- Use remaining files from here (worked between topotools  1.1 and 1.2)
+USE
+- Open VMD, Open Extensions/Tk Console
+- topo readvarxyz bla.xyz step 10 first 5 last 50 -> reads every 10-th frame from the 5-th to the 50-th
+-> without step etc its just all frames
+- modified readvarxyz done by Flo (also additional ones)

@@ -1,0 +1,44 @@
+units      cell
+dimension  3
+newton     off
+processors * * *
+boundary   m m m
+atom_style semEM
+compute_modify thermo_temp dynamic yes
+neighbor      0.45235 bin
+neigh_modify  delay 5
+lattice       diamond 1
+read_restart  grownUp.restart
+reset_timestep 0
+pair_style    hybrid semEMp 4.5235 semNucM 25
+pair_coeff    1 1 semEMp 47318.5 18927.4 2 2 2 2 1.8094 1.2 4.5235
+pair_coeff    1 2 semNucM 47318.5 2 2 1.8094 1.2 2.7793 7.3028
+pair_coeff    2 2 semNucM 375000 10 10 10 1.2 0 25
+fix  1 all langevin 298 298 8.37758e-10 8279
+fix  2 all bd 8.37758e-10
+compute max_bounds all reduce max x y z
+compute min_bounds all reduce min x y z
+region top_block block -8.914079 9.293706 -9.710261 8.823657 6.402311 8.291540
+region bottom_block block -8.914079 9.293706 -9.710261 8.823657 -8.291540 -6.392829
+group top region top_block
+group bottom region bottom_block
+group center subtract all bottom top
+timestep 0.001
+dump 1 bottom xyzSemEM 100 strech_relax_stress15000.000000_b.xyz
+dump 2 center xyzSemEM 100 strech_relax_stress15000.000000_c.xyz
+dump 3 top xyzSemEM 100 strech_relax_stress15000.000000_t.xyz
+dump 4 center custom 100 strech_relax_stress15000.000000_c.lammps id x y z vx vy vz
+restart 10000 temp1.restart temp2.restart
+thermo 100
+fix top_force top aveforce 0 0 0
+fix bottom_velocity bottom move linear 0 0 0
+thermo_style custom step c_min_bounds[3] c_max_bounds[3]
+run 10000
+
+variable strain equal (c_max_bounds[3]-c_min_bounds[3]-14.905494)/14.905494
+thermo_style custom step c_min_bounds[3] c_max_bounds[3] v_strain
+fix top_force top aveforce 0 0 38570.033882
+run 7000
+
+fix top_force top aveforce 0 0 0
+run 4000
